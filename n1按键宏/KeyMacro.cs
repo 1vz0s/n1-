@@ -19,9 +19,21 @@ namespace KeyMacro
         [DllImport("winmm.dll")]
         static extern uint timeEndPeriod(uint uPeriod);
 
+        static Mutex _single;
+
         [STAThread]
         static void Main()
         {
+            // 单实例检测：已经有实例在跑就直接弹提示退出
+            bool first;
+            _single = new Mutex(true, "n1按键宏_SingleInstance", out first);
+            if (!first)
+            {
+                MessageBox.Show("您只能同时运行一个进程", "提示",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
             try { SetProcessDPIAware(); } catch { }
             timeBeginPeriod(1); // 定时器精度提到 1ms，连点间隔才精准不抖
             try
@@ -48,9 +60,11 @@ namespace KeyMacro
     // 一个连点项：键盘键 或 鼠标键，各自独立、各自频率
     class Bind
     {
-        public int type;            // 0=键盘 1=鼠标
+        public int type;            // 0=键盘 1=鼠标 2=坐标点击
         public int code;            // 键盘=Keys 值；鼠标=0左 1右 2中
         public string label;
+        public int clickX = -1;     // 坐标点击的屏幕坐标（type=2 时有效，-1=未设置）
+        public int clickY = -1;
         public volatile int freq = 20;  // 次/秒
         public volatile bool stop = false;
         public int trigger = (int)Keys.F6;   // 该键自己的触发键
@@ -69,6 +83,47 @@ namespace KeyMacro
         public int code;    // 键盘=vk；鼠标=按钮
         public int x, y;    // 鼠标坐标
         public int wheel;   // 滚轮增量
+    }
+
+    // 点 X 时弹出的询问对话框：退出程序 or 隐藏在托盘
+    class CloseAskForm : Form
+    {
+        public bool ExitApp = false;   // true=退出程序 false=隐藏托盘
+
+        public CloseAskForm()
+        {
+            this.Text = "关闭程序";
+            this.FormBorderStyle = FormBorderStyle.FixedDialog;
+            this.MaximizeBox = false;
+            this.MinimizeBox = false;
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.ClientSize = new Size(320, 140);
+            this.ShowInTaskbar = false;
+
+            Label lbl = new Label();
+            lbl.Text = "要退出程序吗？";
+            lbl.AutoSize = true;
+            lbl.Font = new Font("Microsoft YaHei", 12f, FontStyle.Bold);
+            lbl.Location = new Point(24, 22);
+
+            Button btnExit = new Button();
+            btnExit.Text = "退出程序";
+            btnExit.Size = new Size(125, 42);
+            btnExit.Location = new Point(24, 70);
+            btnExit.Font = new Font("Microsoft YaHei", 10f);
+            btnExit.Click += delegate { this.ExitApp = true; this.DialogResult = DialogResult.OK; this.Close(); };
+
+            Button btnHide = new Button();
+            btnHide.Text = "隐藏在托盘";
+            btnHide.Size = new Size(125, 42);
+            btnHide.Location = new Point(170, 70);
+            btnHide.Font = new Font("Microsoft YaHei", 10f);
+            btnHide.Click += delegate { this.ExitApp = false; this.DialogResult = DialogResult.OK; this.Close(); };
+
+            this.Controls.Add(lbl);
+            this.Controls.Add(btnExit);
+            this.Controls.Add(btnHide);
+        }
     }
 
     public class MacroForm : Form
@@ -94,6 +149,69 @@ namespace KeyMacro
 
         [DllImport("user32.dll")]
         static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        // ===== DD 驱动硬件级输入（Raw Input 游戏用，需先装 ddhid 驱动）=====
+        [DllImport("ddhid.43396.dll")]
+        static extern int DD_btn(int btn);        // 鼠标：1左按下 2左抬起 4右按下 8右抬起 16中按下 32中抬起
+        [DllImport("ddhid.43396.dll")]
+        static extern int DD_key(int key, int flag); // 键盘：key=DD键码(DD_todc换算) flag=1按下/2抬起
+        [DllImport("ddhid.43396.dll")]
+        static extern int DD_mov(int x, int y);   // 绝对移动（0~65535 归一化）
+        [DllImport("ddhid.43396.dll")]
+        static extern int DD_whl(int wheel);      // 滚轮
+        [DllImport("ddhid.43396.dll")]
+        static extern int DD_todc(int vk);        // 虚拟键 → DD 键码
+
+        // ===== ViGEm 虚拟 Xbox 手柄 =====
+        [DllImport("ViGEmClient.dll")]
+        static extern IntPtr vigem_alloc();
+        [DllImport("ViGEmClient.dll")]
+        static extern void vigem_free(IntPtr client);
+        [DllImport("ViGEmClient.dll")]
+        static extern int vigem_connect(IntPtr client);   // 0=成功
+        [DllImport("ViGEmClient.dll")]
+        static extern void vigem_disconnect(IntPtr client);
+        [DllImport("ViGEmClient.dll")]
+        static extern IntPtr vigem_target_x360_alloc();
+        [DllImport("ViGEmClient.dll")]
+        static extern int vigem_target_add(IntPtr client, IntPtr target);
+        [DllImport("ViGEmClient.dll")]
+        static extern void vigem_target_remove(IntPtr client, IntPtr target);
+        [DllImport("ViGEmClient.dll")]
+        static extern void vigem_target_free(IntPtr target);
+        [DllImport("ViGEmClient.dll")]
+        static extern void vigem_target_x360_update(IntPtr client, IntPtr target, XUSB_REPORT report);
+
+        const ushort XUSB_DPAD_UP = 0x0001;
+        const ushort XUSB_DPAD_DOWN = 0x0002;
+        const ushort XUSB_DPAD_LEFT = 0x0004;
+        const ushort XUSB_DPAD_RIGHT = 0x0008;
+        const ushort XUSB_START = 0x0010;
+        const ushort XUSB_BACK = 0x0020;
+        const ushort XUSB_LB = 0x0100;
+        const ushort XUSB_RB = 0x0200;
+        const ushort XUSB_A = 0x1000;
+        const ushort XUSB_B = 0x2000;
+        const ushort XUSB_X = 0x4000;
+        const ushort XUSB_Y = 0x8000;
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct XUSB_REPORT
+        {
+            public ushort wButtons;
+            public byte bLeftTrigger;
+            public byte bRightTrigger;
+            public short sThumbLX;
+            public short sThumbLY;
+            public short sThumbRX;
+            public short sThumbRY;
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         struct RECT
@@ -209,18 +327,26 @@ namespace KeyMacro
         const int WM_KEYUP = 0x0101;
         const int WM_SYSKEYUP = 0x0105;
 
+        const int EMERGENCY_STOP_KEY = (int)Keys.F12; // 紧急停止键：一键停所有连点+回放+录制
+
+        const int WM_HOTKEY = 0x0312; // 全局热键消息
+        const int HOTKEY_RECORD = 1;  // F8 开始/停止录制
+        const int HOTKEY_PLAY = 2;    // F9 回放
+        const int HOTKEY_CLEAR = 3;   // F10 清除
+        const int HOTKEY_STOP = 4;    // F12 紧急停止
+
         const uint MOUSEEVENTF_MOVE = 0x0001;
         const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
         const uint MOUSEEVENTF_WHEEL = 0x0800;
         const uint MOUSEEVENTF_VIRTUALDESK = 0x4000; // 绝对坐标映射整个虚拟桌面（多屏修正）
 
         const int PRESS_MS = 15; // 键盘按下到抬起的间隔（毫秒）
-        const int MOUSE_CLICK_GAP = 2; // 鼠标点击 down/up 间隔（毫秒）——瞬点，别搞长按，长按会让游戏内光标闪、鼠标发钝降 DPI
+        const int MOUSE_CLICK_GAP = 2; // 已弃用：鼠标连点改为 SendMouseClick 批量发 down/up 零间隔，此常量仅保留备忘
 
         // ================= UI 控件 =================
         ListBox listKeys;
         TextBox txtTrigger;
-        Button btnAddKey, btnDel, btnClear, btnPickTrigger;
+        Button btnAddKey, btnDel, btnClear, btnPickTrigger, btnAddCoord;
         NumericUpDown numFreq;
         CheckBox chkHold;
         Label lblFreq, lblStatus;
@@ -228,7 +354,7 @@ namespace KeyMacro
         // ================= 状态 =================
         List<Bind> binds = new List<Bind>();
 
-        int captureMode = 0; // 0=无 1=添加按键 2=设置触发键
+        int captureMode = 0; // 0=无 1=添加按键 2=设置触发键 3=添加坐标点击
         bool loading = false; // 加载配置中（避免加载时触发保存）
 
         volatile bool stopWatcher = false; // 停止所有后台线程
@@ -245,7 +371,7 @@ namespace KeyMacro
 
         // ================= 选项卡 =================
         TabControl tabs;
-        TabPage tabClicker, tabMacro;
+        TabPage tabClicker, tabMacro, tabQueue;
         Control host; // 当前构建容器
 
         // ================= 宏录制 =================
@@ -270,6 +396,38 @@ namespace KeyMacro
         ComboBox cmbMacroFile;   // 已保存宏列表
         Button btnSaveMacro, btnLoadMacro, btnRenameMacro, btnDelMacro;
 
+        NumericUpDown numLoops;      // 循环次数
+        CheckBox chkLoopForever;     // 无限循环
+        ComboBox cmbSpeed;           // 回放速度倍率
+        CheckBox chkHumanize;        // 人类化抖动
+        int pendingLoops = 1;        // 回放线程读的参数快照（UI 线程先填好，避免跨线程读控件）
+        double pendingSpeed = 1.0;
+        bool pendingHumanize = false;
+        CheckBox chkAutoPlay;              // 定时回放开关
+        NumericUpDown numAutoInterval;     // 定时间隔（秒）
+        System.Windows.Forms.Timer autoTimer; // 定时器
+        int autoElapsed = 0;               // 已累计秒数
+
+        ListBox listQueue;                     // 多宏队列显示框
+        List<string> macroQueue = new List<string>(); // 队列里的宏名（按顺序）
+        CheckBox chkQueuePlay;                 // 队列回放开关
+        Button btnAddQueue, btnRemoveQueue, btnClearQueue, btnQueueUp, btnQueueDown;
+        bool pendingQueue = false;             // 回放线程读的队列开关快照
+        string[] pendingQueueList = null;      // 回放线程读的队列列表快照
+        CheckBox chkDD;                        // DD 驱动硬件输入开关
+        volatile bool useDD = false;           // DD 开关状态（volatile 供连点/回放线程读）
+
+        IntPtr vigemClient = IntPtr.Zero;      // ViGEm 客户端
+        IntPtr vigemPad = IntPtr.Zero;         // 虚拟 Xbox 手柄目标
+        bool vigemReady = false;               // 手柄已连接
+        CheckBox chkPad;                       // 启用虚拟手柄
+        ComboBox cmbPadKey, cmbPadBtn;         // 触发键 / 手柄按键
+        System.Windows.Forms.Timer padTimer;   // 手柄轮询
+        ushort currentPadButtons = 0;          // 当前按住的手柄按键
+        string[] padBtnNames = { "A", "B", "X", "Y", "LB", "RB", "Start", "Back", "十字上", "十字下", "十字左", "十字右" };
+        ushort[] padBtnCodes = { XUSB_A, XUSB_B, XUSB_X, XUSB_Y, XUSB_LB, XUSB_RB, XUSB_START, XUSB_BACK, XUSB_DPAD_UP, XUSB_DPAD_DOWN, XUSB_DPAD_LEFT, XUSB_DPAD_RIGHT };
+        Keys[] padKeyCodes = { Keys.A, Keys.S, Keys.D, Keys.F, Keys.Q, Keys.E, Keys.R, Keys.W, Keys.Space, Keys.LShiftKey };
+
         // 窗口缩放：记录初始布局，OnResize 里按比例缩放字体和控件
         Size initClient;
         float initFontSz;
@@ -280,7 +438,7 @@ namespace KeyMacro
         public MacroForm()
         {
             this.Text = "n1按键宏 " + APP_VERSION;
-            this.ClientSize = new Size(520, 560);
+            this.ClientSize = new Size(520, 620);
             this.FormBorderStyle = FormBorderStyle.Sizable;
             this.StartPosition = FormStartPosition.CenterScreen;
             this.KeyPreview = true;
@@ -312,8 +470,10 @@ namespace KeyMacro
 
             tabClicker = new TabPage("连点");
             tabMacro = new TabPage("宏录制");
+            tabQueue = new TabPage("队列");
             tabs.TabPages.Add(tabClicker);
             tabs.TabPages.Add(tabMacro);
+            tabs.TabPages.Add(tabQueue);
 
             host = tabClicker;
             AddLabel("连点按键列表（选中后调触发键/速度）", 20, 10, 480);
@@ -333,6 +493,9 @@ namespace KeyMacro
 
             btnClear = AddButton("清空", 260, 300, 120, 34);
             btnClear.Click += delegate { ClearBinds(); };
+
+            btnAddCoord = AddButton("加坐标点击", 390, 300, 110, 34);
+            btnAddCoord.Click += delegate { StartCapture(3); };
 
             AddLabel("速度", 20, 350, 50);
             numFreq = new NumericUpDown();
@@ -380,7 +543,19 @@ namespace KeyMacro
             lblStatus = AddLabel("", 20, 468, 480);
             lblStatus.TextAlign = ContentAlignment.MiddleLeft;
 
+            chkDD = new CheckBox();
+            chkDD.Text = "DD驱动硬件级输入（Raw Input 游戏用，需先装 ddhid 驱动；未装则点击无效）";
+            chkDD.Location = new Point(20, 496);
+            chkDD.AutoSize = true;
+            chkDD.CheckedChanged += delegate
+            {
+                useDD = chkDD.Checked;
+                Log(useDD ? "[DD] 硬件输入已开（DD驱动直通内核），未装驱动会点击无效" : "[DD] 硬件输入已关，走 SendInput");
+            };
+            host.Controls.Add(chkDD);
+
             BuildMacroTab();
+            BuildQueueTab();
         }
 
         void BuildMacroTab()
@@ -453,6 +628,234 @@ namespace KeyMacro
 
             btnDelMacro = AddButton("删除", 220, 438, 90, 30);
             btnDelMacro.Click += delegate { DeleteMacro(); };
+
+            // ===== 回放增强：循环 / 速度 / 人类化抖动 =====
+            AddLabel("循环次数", 20, 478, 70);
+            numLoops = new NumericUpDown();
+            numLoops.Location = new Point(90, 474);
+            numLoops.Size = new Size(60, 25);
+            numLoops.Minimum = 1;
+            numLoops.Maximum = 9999;
+            numLoops.Value = 1;
+            host.Controls.Add(numLoops);
+
+            chkLoopForever = new CheckBox();
+            chkLoopForever.Text = "无限循环";
+            chkLoopForever.Location = new Point(160, 476);
+            chkLoopForever.AutoSize = true;
+            host.Controls.Add(chkLoopForever);
+
+            AddLabel("速度", 250, 478, 40);
+            cmbSpeed = new ComboBox();
+            cmbSpeed.Location = new Point(290, 474);
+            cmbSpeed.Size = new Size(70, 26);
+            cmbSpeed.DropDownStyle = ComboBoxStyle.DropDownList;
+            cmbSpeed.Items.AddRange(new object[] { "0.5x", "1x", "2x", "3x", "5x", "10x" });
+            cmbSpeed.SelectedIndex = 1; // 默认 1x
+            host.Controls.Add(cmbSpeed);
+
+            chkHumanize = new CheckBox();
+            chkHumanize.Text = "人类化";
+            chkHumanize.Location = new Point(370, 476);
+            chkHumanize.AutoSize = true;
+            host.Controls.Add(chkHumanize);
+
+            // ===== 定时回放 =====
+            AddLabel("定时回放", 20, 510, 70);
+            numAutoInterval = new NumericUpDown();
+            numAutoInterval.Location = new Point(90, 506);
+            numAutoInterval.Size = new Size(60, 25);
+            numAutoInterval.Minimum = 1;
+            numAutoInterval.Maximum = 86400;
+            numAutoInterval.Value = 60;
+            host.Controls.Add(numAutoInterval);
+            AddLabel("秒/次", 155, 510, 50);
+
+            chkAutoPlay = new CheckBox();
+            chkAutoPlay.Text = "启用";
+            chkAutoPlay.Location = new Point(210, 508);
+            chkAutoPlay.AutoSize = true;
+            chkAutoPlay.CheckedChanged += delegate { ToggleAutoPlay(); };
+            host.Controls.Add(chkAutoPlay);
+        }
+
+        void BuildQueueTab()
+        {
+            host = tabQueue;
+
+            AddLabel("多宏队列：把多个宏按顺序排队，回放时依次循环执行", 20, 10, 480);
+            AddLabel("① 到“宏录制”页选宏 → 点“加入队列”   ② 勾选“队列回放”后按 F9", 20, 34, 480);
+
+            listQueue = new ListBox();
+            listQueue.Location = new Point(20, 62);
+            listQueue.Size = new Size(360, 300);
+            listQueue.IntegralHeight = false;
+            host.Controls.Add(listQueue);
+
+            btnAddQueue = AddButton("加入队列", 390, 62, 110, 32);
+            btnAddQueue.Click += delegate { AddToQueue(); };
+            btnRemoveQueue = AddButton("移除选中", 390, 102, 110, 32);
+            btnRemoveQueue.Click += delegate { RemoveFromQueue(); };
+            btnQueueUp = AddButton("上移", 390, 142, 110, 32);
+            btnQueueUp.Click += delegate { MoveQueueItem(-1); };
+            btnQueueDown = AddButton("下移", 390, 182, 110, 32);
+            btnQueueDown.Click += delegate { MoveQueueItem(1); };
+            btnClearQueue = AddButton("清空队列", 390, 222, 110, 32);
+            btnClearQueue.Click += delegate { ClearQueue(); };
+
+            chkQueuePlay = new CheckBox();
+            chkQueuePlay.Text = "队列回放（勾选后 F9 按队列顺序循环，不勾则回放“宏录制”页当前加载的宏）";
+            chkQueuePlay.Location = new Point(20, 372);
+            chkQueuePlay.AutoSize = true;
+            host.Controls.Add(chkQueuePlay);
+
+            // ===== 虚拟手柄（ViGEm）=====
+            AddLabel("虚拟手柄（ViGEm）：按住触发键 = 按住虚拟 Xbox 手柄按键（需装 ViGEmBus 驱动）", 20, 410, 480);
+
+            chkPad = new CheckBox();
+            chkPad.Text = "启用虚拟手柄";
+            chkPad.Location = new Point(20, 436);
+            chkPad.AutoSize = true;
+            chkPad.CheckedChanged += delegate { TogglePad(); };
+            host.Controls.Add(chkPad);
+
+            AddLabel("触发键", 140, 440, 50);
+            cmbPadKey = new ComboBox();
+            cmbPadKey.Location = new Point(195, 436);
+            cmbPadKey.Size = new Size(90, 26);
+            cmbPadKey.DropDownStyle = ComboBoxStyle.DropDownList;
+            foreach (Keys k in padKeyCodes) cmbPadKey.Items.Add(k);
+            cmbPadKey.SelectedIndex = 0;
+            host.Controls.Add(cmbPadKey);
+
+            AddLabel("手柄按键", 300, 440, 60);
+            cmbPadBtn = new ComboBox();
+            cmbPadBtn.Location = new Point(360, 436);
+            cmbPadBtn.Size = new Size(90, 26);
+            cmbPadBtn.DropDownStyle = ComboBoxStyle.DropDownList;
+            foreach (string n in padBtnNames) cmbPadBtn.Items.Add(n);
+            cmbPadBtn.SelectedIndex = 0;
+            host.Controls.Add(cmbPadBtn);
+        }
+
+        void AddToQueue()
+        {
+            if (cmbMacroFile.SelectedIndex < 0) { MessageBox.Show("先在“宏录制”页选择一个宏。"); return; }
+            string name = cmbMacroFile.SelectedItem.ToString();
+            if (macroQueue.Contains(name)) { MessageBox.Show("这个宏已经在队列里了。"); return; }
+            macroQueue.Add(name);
+            RefreshQueueList();
+            Log("[队列] 加入 " + name + "（共 " + macroQueue.Count + " 个）");
+        }
+
+        void RemoveFromQueue()
+        {
+            int i = listQueue.SelectedIndex;
+            if (i >= 0 && i < macroQueue.Count) { macroQueue.RemoveAt(i); RefreshQueueList(); }
+        }
+
+        void ClearQueue()
+        {
+            macroQueue.Clear();
+            RefreshQueueList();
+            Log("[队列] 已清空");
+        }
+
+        void MoveQueueItem(int dir)
+        {
+            int i = listQueue.SelectedIndex;
+            if (i < 0) return;
+            int j = i + dir;
+            if (j < 0 || j >= macroQueue.Count) return;
+            string tmp = macroQueue[i]; macroQueue[i] = macroQueue[j]; macroQueue[j] = tmp;
+            RefreshQueueList();
+            listQueue.SelectedIndex = j;
+        }
+
+        void RefreshQueueList()
+        {
+            listQueue.Items.Clear();
+            foreach (string n in macroQueue) listQueue.Items.Add(n);
+        }
+
+        // ================= ViGEm 虚拟手柄 =================
+        void TogglePad()
+        {
+            if (chkPad.Checked)
+            {
+                EnsurePad();
+                if (padTimer == null)
+                {
+                    padTimer = new System.Windows.Forms.Timer();
+                    padTimer.Interval = 15; // ~60Hz 轮询，按住响应跟手
+                    padTimer.Tick += delegate { PollPad(); };
+                }
+                padTimer.Start();
+            }
+            else
+            {
+                if (padTimer != null) padTimer.Stop();
+                ReleasePadButtons();
+            }
+        }
+
+        void EnsurePad()
+        {
+            if (vigemReady) return;
+            try
+            {
+                vigemClient = vigem_alloc();
+                if (vigemClient == IntPtr.Zero) { Log("[手柄] vigem_alloc 失败"); return; }
+                if (vigem_connect(vigemClient) != 0)
+                {
+                    Log("[手柄] 连接失败：请先安装 ViGEmBus 驱动");
+                    vigem_free(vigemClient); vigemClient = IntPtr.Zero;
+                    return;
+                }
+                vigemPad = vigem_target_x360_alloc();
+                if (vigemPad == IntPtr.Zero)
+                {
+                    Log("[手柄] 目标分配失败");
+                    vigem_disconnect(vigemClient); vigem_free(vigemClient); vigemClient = IntPtr.Zero;
+                    return;
+                }
+                if (vigem_target_add(vigemClient, vigemPad) != 0)
+                {
+                    Log("[手柄] 目标挂载失败");
+                    vigem_target_free(vigemPad); vigemPad = IntPtr.Zero;
+                    vigem_disconnect(vigemClient); vigem_free(vigemClient); vigemClient = IntPtr.Zero;
+                    return;
+                }
+                vigemReady = true;
+                Log("[手柄] 虚拟 Xbox 手柄已连接");
+            }
+            catch (Exception ex) { Log("[手柄] 初始化异常：" + ex.Message); }
+        }
+
+        void PollPad()
+        {
+            if (!vigemReady || !chkPad.Checked) return;
+            if (cmbPadKey.SelectedIndex < 0 || cmbPadBtn.SelectedIndex < 0) return;
+            int vk = (int)(Keys)cmbPadKey.SelectedItem;
+            ushort btn = padBtnCodes[cmbPadBtn.SelectedIndex];
+            bool held = (GetAsyncKeyState(vk) & 0x8000) != 0;
+            ushort want = held ? btn : (ushort)0;
+            if (want == currentPadButtons) return;
+            currentPadButtons = want;
+            XUSB_REPORT r = new XUSB_REPORT();
+            r.wButtons = currentPadButtons;
+            vigem_target_x360_update(vigemClient, vigemPad, r);
+        }
+
+        void ReleasePadButtons()
+        {
+            if (vigemReady)
+            {
+                XUSB_REPORT r = new XUSB_REPORT();
+                r.wButtons = 0;
+                vigem_target_x360_update(vigemClient, vigemPad, r);
+            }
+            currentPadButtons = 0;
         }
 
         Label AddLabel(string text, int x, int y, int w)
@@ -488,10 +891,17 @@ namespace KeyMacro
         // ================= 按键列表管理 =================
         string BindDisplay(Bind b)
         {
+            if (b.type == 2)
+                return "坐标(" + b.clickX + "," + b.clickY + ") ← " + TriggerName(b.trigger) + "（" + b.freq + "次/秒）";
             return b.label + " ← " + TriggerName(b.trigger) + "（" + b.freq + "次/秒）";
         }
 
         void AddBind(int type, int code, int freq, int trigger, bool hold)
+        {
+            AddBind(type, code, freq, trigger, hold, -1, -1);
+        }
+
+        void AddBind(int type, int code, int freq, int trigger, bool hold, int cx, int cy)
         {
             Bind b = new Bind();
             b.type = type;
@@ -499,11 +909,14 @@ namespace KeyMacro
             b.freq = freq;
             b.trigger = trigger;
             b.hold = hold;
-            b.label = (type == 1) ? MouseBtnName(code) : KeyToString((Keys)code);
+            b.clickX = cx;
+            b.clickY = cy;
+            b.label = (type == 1) ? MouseBtnName(code) : (type == 2) ? "坐标点击" : KeyToString((Keys)code);
 
             foreach (Bind x in binds)
             {
-                if (x.type == b.type && x.code == b.code) return; // 去重
+                // 去重：坐标点击按坐标判重，键盘/鼠标按 code 判重
+                if (x.type == b.type && ((b.type == 2) ? (x.clickX == b.clickX && x.clickY == b.clickY) : (x.code == b.code))) return;
             }
 
             binds.Add(b);
@@ -586,7 +999,9 @@ namespace KeyMacro
             captureMode = mode;
             btnAddKey.Text = (mode == 1) ? "请按键/点鼠标...(Esc取消)" : "添加按键";
             btnPickTrigger.Text = (mode == 2) ? "请按键/点鼠标...(Esc取消)" : "设置";
+            btnAddCoord.Text = (mode == 3) ? "请点击目标位置...(Esc取消)" : "加坐标点击";
             SyncMouseHook();
+            SyncKeyboardHook();
         }
 
         void StopCapture()
@@ -594,7 +1009,9 @@ namespace KeyMacro
             captureMode = 0;
             btnAddKey.Text = "添加按键";
             btnPickTrigger.Text = "设置";
+            btnAddCoord.Text = "加坐标点击";
             SyncMouseHook();
+            SyncKeyboardHook();
         }
 
         // ================= 鼠标钩子动态挂载 =================
@@ -620,9 +1037,43 @@ namespace KeyMacro
 
         void SyncMouseHook()
         {
-            bool need = recording || playing || captureMode == 1 || captureMode == 2;
+            // 注意 captureMode==3（加坐标点击）也要挂鼠标钩子，否则点不到坐标
+            bool need = recording || playing || captureMode != 0;
             if (need) EnsureMouseHook();
             else ReleaseMouseHook();
+        }
+
+        // 键盘钩子同样按需挂载：平时卸载，让键盘输入 100% 原生丝滑。
+        // F8/F9/F10/F12 改由 RegisterHotKey 提供，不再需要常驻低级钩子。
+        void EnsureKeyboardHook()
+        {
+            if (keyboardHook == IntPtr.Zero)
+            {
+                keyboardProc = KeyboardHookProc;
+                keyboardHook = SetWindowsHookExKB(WH_KEYBOARD_LL, keyboardProc, IntPtr.Zero, 0);
+            }
+        }
+
+        void ReleaseKeyboardHook()
+        {
+            if (keyboardHook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(keyboardHook);
+                keyboardHook = IntPtr.Zero;
+            }
+        }
+
+        void SyncKeyboardHook()
+        {
+            // 键盘钩子只在录制/回放/捕获按键时挂；坐标点击(captureMode 3)不用键盘钩子
+            bool need = recording || playing || captureMode == 1 || captureMode == 2;
+            if (need) EnsureKeyboardHook();
+            else ReleaseKeyboardHook();
+        }
+
+        bool IsHotkeyVk(int vk)
+        {
+            return vk == (int)Keys.F8 || vk == (int)Keys.F9 || vk == (int)Keys.F10 || vk == EMERGENCY_STOP_KEY;
         }
 
         IntPtr MouseHookProc(int nCode, IntPtr wParam, IntPtr lParam)
@@ -648,7 +1099,7 @@ namespace KeyMacro
                 RecordMouse(msg, info);
             }
 
-            if (captureMode == 1 || captureMode == 2)
+            if (captureMode == 1 || captureMode == 2 || captureMode == 3)
             {
                 int btn = -1;
                 if (msg == WM_LBUTTONDOWN) btn = 0;
@@ -659,8 +1110,10 @@ namespace KeyMacro
                 {
                     if (captureMode == 1)
                         AddBind(1, btn, 20, (int)Keys.F6, true);
-                    else
+                    else if (captureMode == 2)
                         SetSelectedTrigger(MouseToVk(btn));
+                    else // captureMode == 3：捕获点击坐标，添加坐标点击
+                        AddBind(2, 0, 20, (int)Keys.F6, true, info.pt_x, info.pt_y);
                     StopCapture();
                     return (IntPtr)1; // 吞掉这次点击
                 }
@@ -682,7 +1135,10 @@ namespace KeyMacro
                         int vk = (int)info.vkCode;
                         bool down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
 
-                        // 回放中：任何人工按键立即中断回放（键照常传递）
+                        // 全局热键 F8/F9/F10/F12 改由 RegisterHotKey 处理，钩子一律跳过避免重复触发
+                        if (IsHotkeyVk(vk)) return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+
+                        // 回放中：任何人工按键（热键除外）立即中断回放（键照常传递）
                         if (playing && down)
                         {
                             manualInterrupt = true;
@@ -690,10 +1146,7 @@ namespace KeyMacro
                             return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
                         }
 
-                        // 宏录制控制热键（按下时触发）
-                        if (down && HandleMacroHotkey(vk)) return (IntPtr)1;
-
-                        // 录制中记录键盘
+                        // 录制中记录键盘（热键已跳过，不会录进去）
                         if (recording) RecordKey(vk, down);
 
                         // 连点器捕获（仅按下时处理）
@@ -745,8 +1198,12 @@ namespace KeyMacro
         protected override void OnLoad(EventArgs e)
         {
             base.OnLoad(e);
-            keyboardProc = KeyboardHookProc;
-            keyboardHook = SetWindowsHookExKB(WH_KEYBOARD_LL, keyboardProc, IntPtr.Zero, 0);
+            // 全局热键：F8/F9/F10/F12 走 RegisterHotKey（比低级钩子轻、不占全局按键延迟）
+            RegisterHotKey(this.Handle, HOTKEY_RECORD, 0, (uint)Keys.F8);
+            RegisterHotKey(this.Handle, HOTKEY_PLAY, 0, (uint)Keys.F9);
+            RegisterHotKey(this.Handle, HOTKEY_CLEAR, 0, (uint)Keys.F10);
+            RegisterHotKey(this.Handle, HOTKEY_STOP, 0, (uint)Keys.F12);
+            // 键盘钩子改成按需挂载（录制/回放/捕获时才挂），平时卸载不拦按键
 
             stopWatcher = false;
 
@@ -758,6 +1215,23 @@ namespace KeyMacro
             RefreshProcessList();
             RefreshMacroFileList();
             InitTray();
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_HOTKEY)
+            {
+                int id = m.WParam.ToInt32();
+                switch (id)
+                {
+                    case HOTKEY_RECORD: ToggleRecording(); break;
+                    case HOTKEY_PLAY: StartPlayback(); break;
+                    case HOTKEY_CLEAR: ClearMacro(); break;
+                    case HOTKEY_STOP: StopAll(); break;
+                }
+                return;
+            }
+            base.WndProc(ref m);
         }
 
         // ================= 系统托盘 =================
@@ -795,14 +1269,31 @@ namespace KeyMacro
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // 点 X 不退出，藏到托盘；只有托盘菜单"关闭"才真正退出
-            if (!reallyExit)
+            // 托盘菜单"关闭"已设 reallyExit=true，直接真退
+            if (reallyExit)
             {
-                e.Cancel = true;
-                this.Hide();
+                base.OnFormClosing(e);
                 return;
             }
-            base.OnFormClosing(e);
+
+            // 用户点 X：先拦住，弹询问，退出 or 藏托盘
+            e.Cancel = true;
+            using (CloseAskForm dlg = new CloseAskForm())
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                {
+                    if (dlg.ExitApp)
+                    {
+                        reallyExit = true;
+                        // 延后关闭：在 OnFormClosing 里直接 Close() 会被当成重入 no-op 忽略，退不出去
+                        this.BeginInvoke((MethodInvoker)delegate { this.Close(); });
+                    }
+                    else
+                    {
+                        this.Hide();    // 藏托盘
+                    }
+                }
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -814,7 +1305,26 @@ namespace KeyMacro
             foreach (Bind b in binds) b.stop = true;
             if (mouseHook != IntPtr.Zero) UnhookWindowsHookEx(mouseHook);
             if (keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(keyboardHook);
+            UnregisterHotKey(this.Handle, HOTKEY_RECORD);
+            UnregisterHotKey(this.Handle, HOTKEY_PLAY);
+            UnregisterHotKey(this.Handle, HOTKEY_CLEAR);
+            UnregisterHotKey(this.Handle, HOTKEY_STOP);
+            if (padTimer != null) padTimer.Stop();
+            if (vigemReady)
+            {
+                try
+                {
+                    XUSB_REPORT r = new XUSB_REPORT(); r.wButtons = 0;
+                    vigem_target_x360_update(vigemClient, vigemPad, r);
+                    vigem_target_remove(vigemClient, vigemPad);
+                    vigem_target_free(vigemPad);
+                    vigem_disconnect(vigemClient);
+                    vigem_free(vigemClient);
+                }
+                catch { }
+            }
             if (statusTimer != null) statusTimer.Stop();
+            if (autoTimer != null) autoTimer.Stop();
             if (trayIcon != null) { trayIcon.Visible = false; trayIcon.Dispose(); }
             if (trayMenu != null) trayMenu.Dispose();
             base.OnFormClosed(e);
@@ -950,27 +1460,25 @@ namespace KeyMacro
                 }
                 finally { sendingInput = false; }
             }
+            else if (b.type == 2)
+            {
+                // 坐标点击：先移动鼠标到目标坐标，再左键点击
+                if (useDD) { DDMoveAbs(b.clickX, b.clickY); Thread.Sleep(2); SendMouseClickDD(0); }
+                else { SendMouseMoveAbs(b.clickX, b.clickY); Thread.Sleep(2); SendMouseClick(0); }
+            }
             else
             {
-                // 瞬点：down/up 间隔 2ms，干净利落。游戏内光标不再一直显示按下状态，鼠标移动不卡不降 DPI。
-                SendMouseEvent(b.code, false);
-                Thread.Sleep(MOUSE_CLICK_GAP);
-                SendMouseEvent(b.code, true);
+                // 对标鼠大侠：down/up 一次批量发出，中间零 Sleep，点击瞬间完成不阻塞
+                // 消除 BelowNormal 线程下 Sleep(2) 膨胀造成的"伪长按"→ 指针发钝卡顿
+                // DD 模式：直通驱动，Raw Input 游戏也能收到点击
+                if (useDD) SendMouseClickDD(b.code);
+                else SendMouseClick(b.code);
             }
         }
 
         bool IsTriggerHeld(int vk)
         {
             return (GetAsyncKeyState(vk) & 0x8000) != 0;
-        }
-
-        // ================= 宏录制/回放 =================
-        bool HandleMacroHotkey(int vk)
-        {
-            if (vk == (int)Keys.F8) { ToggleRecording(); return true; }
-            if (vk == (int)Keys.F9) { StartPlayback(); return true; }
-            if (vk == (int)Keys.F10) { ClearMacro(); return true; }
-            return false;
         }
 
         // ================= 宏日志 / 进程过滤 =================
@@ -1058,6 +1566,7 @@ namespace KeyMacro
             }
             UpdateMacroStatus();
             SyncMouseHook();
+            SyncKeyboardHook();
         }
 
         void ClearMacro()
@@ -1071,11 +1580,24 @@ namespace KeyMacro
         void StartPlayback()
         {
             if (recording || playing) return;
-            if (macroEvents.Count == 0) return;
+            // 队列回放：勾选且有队列时按队列串起来播；否则播当前加载的单个宏
+            pendingQueue = chkQueuePlay.Checked && macroQueue.Count > 0;
+            if (!pendingQueue && macroEvents.Count == 0) return;
+            // UI 线程先把回放参数读到快照字段，回放线程读快照，避免跨线程访问控件
+            pendingLoops = chkLoopForever.Checked ? -1 : (int)numLoops.Value;
+            pendingSpeed = ParseSpeed();
+            pendingHumanize = chkHumanize.Checked;
+            pendingQueueList = pendingQueue ? macroQueue.ToArray() : null;
             playing = true;
-            Log("[回放] 开始，共 " + macroEvents.Count + " 个事件");
+            if (pendingQueue)
+                Log("[回放] 开始队列回放，共 " + macroQueue.Count + " 个宏" +
+                    (chkLoopForever.Checked ? "（无限循环）" : "（循环 " + pendingLoops + " 次）"));
+            else
+                Log("[回放] 开始，共 " + macroEvents.Count + " 个事件" +
+                    (chkLoopForever.Checked ? "（无限循环）" : "（循环 " + pendingLoops + " 次）"));
             UpdateMacroStatus();
             SyncMouseHook();
+            SyncKeyboardHook();
             Thread t = new Thread(PlayLoop);
             t.IsBackground = true;
             t.Start();
@@ -1093,6 +1615,63 @@ namespace KeyMacro
                 UpdateMacroStatus();
             }
             SyncMouseHook();
+            SyncKeyboardHook();
+        }
+
+        void StopAll()
+        {
+            // 紧急停止：立即复位运行状态（这些 volatile，任意线程改都安全）
+            playing = false;
+            recording = false;
+            foreach (Bind b in binds) { b.toggle = false; b.clicking = false; }
+            // UI 更新：可能在钩子线程调用，走 Invoke 保险
+            if (this.InvokeRequired)
+            {
+                try { BeginInvoke((Action)delegate { UpdateMacroStatus(); UpdateStatus(); Log("[紧急停止] 已停止所有连点和回放"); }); } catch { }
+            }
+            else
+            {
+                UpdateMacroStatus(); UpdateStatus(); Log("[紧急停止] 已停止所有连点和回放");
+            }
+            SyncMouseHook();
+            SyncKeyboardHook();
+        }
+
+        void ToggleAutoPlay()
+        {
+            if (chkAutoPlay.Checked)
+            {
+                if (autoTimer == null)
+                {
+                    autoTimer = new System.Windows.Forms.Timer();
+                    autoTimer.Interval = 1000;
+                    autoTimer.Tick += delegate { AutoPlayTick(); };
+                }
+                autoElapsed = 0;
+                autoTimer.Start();
+                Log("[定时] 已启用定时回放，每 " + (int)numAutoInterval.Value + " 秒一次");
+            }
+            else
+            {
+                if (autoTimer != null) autoTimer.Stop();
+                Log("[定时] 已关闭定时回放");
+            }
+        }
+
+        void AutoPlayTick()
+        {
+            if (!chkAutoPlay.Checked) return;
+            autoElapsed++;
+            int interval = (int)numAutoInterval.Value;
+            if (interval < 1) interval = 1;
+            if (autoElapsed >= interval)
+            {
+                autoElapsed = 0;
+                if (!recording && !playing && macroEvents.Count > 0)
+                {
+                    StartPlayback();
+                }
+            }
         }
 
         void AddMacroEvent(MacroEvent ev)
@@ -1151,19 +1730,73 @@ namespace KeyMacro
 
         void PlayLoop()
         {
-            foreach (MacroEvent ev in macroEvents)
+            int loops = pendingLoops;
+            double speed = pendingSpeed;
+            bool humanize = pendingHumanize;
+            Random rnd = humanize ? new Random() : null;
+            int done = 0;
+
+            // 组装待回放的事件列表：队列模式=按队列顺序串多个宏；否则=当前加载的宏
+            List<List<MacroEvent>> playList = new List<List<MacroEvent>>();
+            if (pendingQueue && pendingQueueList != null && pendingQueueList.Length > 0)
             {
-                if (!playing) break;
-                if (ev.delay > 0) Thread.Sleep(ev.delay);
-                if (!playing) break;
-                if (!IsTargetForeground()) { manualInterrupt = true; break; }
-                if (ev.type == 0) PlayKey(ev);
-                else PlayMouse(ev);
+                foreach (string name in pendingQueueList)
+                {
+                    try { playList.Add(LoadMacroEvents(name)); }
+                    catch { /* 读不出来的宏直接跳过 */ }
+                }
             }
+            if (playList.Count == 0) playList.Add(macroEvents);
+
+            while (playing)
+            {
+                foreach (List<MacroEvent> list in playList)
+                {
+                    if (!playing) break;
+                    foreach (MacroEvent ev in list)
+                    {
+                        if (!playing) break;
+                        int d = ScaleDelay(ev.delay, speed, humanize, rnd);
+                        if (d > 0) Thread.Sleep(d);
+                        if (!playing) break;
+                        if (!IsTargetForeground()) { manualInterrupt = true; break; }
+                        if (ev.type == 0) PlayKey(ev);
+                        else PlayMouse(ev);
+                    }
+                    if (!playing || manualInterrupt) break;
+                }
+                if (!playing || manualInterrupt) break;
+                done++;
+                if (loops >= 0 && done >= loops) break;
+            }
+
             playing = false;
             bool wasInterrupt = manualInterrupt;
             manualInterrupt = false;
             try { BeginInvoke((Action)delegate { Log(wasInterrupt ? "[回放] 人工中断，已复位" : "[回放] 结束"); UpdateMacroStatus(); }); } catch { }
+        }
+
+        // 回放延迟缩放：速度倍率 + 可选人类化抖动（±20%），最小 1ms
+        int ScaleDelay(int delay, double speed, bool humanize, Random rnd)
+        {
+            int d = delay;
+            if (speed > 0 && d > 0) d = Math.Max(1, (int)Math.Round(d / speed));
+            if (humanize && rnd != null && d > 2)
+            {
+                int jitter = (int)(d * 0.2);
+                if (jitter < 1) jitter = 1;
+                d = Math.Max(1, d + rnd.Next(-jitter, jitter + 1));
+            }
+            return d;
+        }
+
+        double ParseSpeed()
+        {
+            string s = (cmbSpeed.SelectedItem != null) ? cmbSpeed.SelectedItem.ToString() : "1x";
+            s = s.Replace("x", "").Replace("X", "").Trim();
+            double v;
+            if (double.TryParse(s, out v) && v > 0) return v;
+            return 1.0;
         }
 
         void PlayKey(MacroEvent ev)
@@ -1171,7 +1804,9 @@ namespace KeyMacro
             sendingInput = true;
             try
             {
-                if (ev.action == 0) SendKeyDown((Keys)ev.code);
+                if (useDD)
+                    DD_key(DD_todc(ev.code), ev.action == 0 ? 1 : 2);
+                else if (ev.action == 0) SendKeyDown((Keys)ev.code);
                 else SendKeyUp((Keys)ev.code);
                 Thread.Sleep(2); // 等 DD 键事件到达钩子再解除
             }
@@ -1180,6 +1815,22 @@ namespace KeyMacro
 
         void PlayMouse(MacroEvent ev)
         {
+            if (useDD)
+            {
+                switch (ev.action)
+                {
+                    case 0: DDMoveAbs(ev.x, ev.y); break; // 移动
+                    case 1: DD_btn(1); break;             // 左按下
+                    case 2: DD_btn(2); break;             // 左抬起
+                    case 3: DD_btn(4); break;             // 右按下
+                    case 4: DD_btn(8); break;             // 右抬起
+                    case 5: DD_btn(16); break;            // 中按下
+                    case 6: DD_btn(32); break;            // 中抬起
+                    case 7: DD_whl(ev.wheel); break;      // 滚轮
+                }
+                return;
+            }
+
             INPUT input = new INPUT();
             input.type = INPUT_MOUSE;
             input.U.mi.dx = ev.x;
@@ -1296,6 +1947,35 @@ namespace KeyMacro
             catch (Exception ex) { MessageBox.Show("保存失败：" + ex.Message); }
         }
 
+        // 从宏文件读事件列表（队列回放也会用到）
+        List<MacroEvent> LoadMacroEvents(string name)
+        {
+            string path = Path.Combine(MacroDir(), name + ".n1m");
+            List<MacroEvent> list = new List<MacroEvent>();
+            using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
+            using (BinaryReader r = new BinaryReader(fs))
+            {
+                byte[] magic = r.ReadBytes(3);
+                if (magic.Length < 3 || magic[0] != 'N' || magic[1] != '1' || magic[2] != 'M')
+                    throw new Exception("不是有效的宏文件");
+                r.ReadInt32(); // 版本
+                int n = r.ReadInt32();
+                for (int i = 0; i < n; i++)
+                {
+                    MacroEvent ev = new MacroEvent();
+                    ev.delay = r.ReadInt32();
+                    ev.type = r.ReadInt32();
+                    ev.action = r.ReadInt32();
+                    ev.code = r.ReadInt32();
+                    ev.x = r.ReadInt32();
+                    ev.y = r.ReadInt32();
+                    ev.wheel = r.ReadInt32();
+                    list.Add(ev);
+                }
+            }
+            return list;
+        }
+
         void LoadMacro()
         {
             if (recording || playing) return;
@@ -1303,30 +1983,7 @@ namespace KeyMacro
             string name = cmbMacroFile.SelectedItem.ToString();
             try
             {
-                string path = Path.Combine(MacroDir(), name + ".n1m");
-                List<MacroEvent> list = new List<MacroEvent>();
-                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read))
-                using (BinaryReader r = new BinaryReader(fs))
-                {
-                    byte[] magic = r.ReadBytes(3);
-                    if (magic.Length < 3 || magic[0] != 'N' || magic[1] != '1' || magic[2] != 'M')
-                        throw new Exception("不是有效的宏文件");
-                    r.ReadInt32(); // 版本
-                    int n = r.ReadInt32();
-                    for (int i = 0; i < n; i++)
-                    {
-                        MacroEvent ev = new MacroEvent();
-                        ev.delay = r.ReadInt32();
-                        ev.type = r.ReadInt32();
-                        ev.action = r.ReadInt32();
-                        ev.code = r.ReadInt32();
-                        ev.x = r.ReadInt32();
-                        ev.y = r.ReadInt32();
-                        ev.wheel = r.ReadInt32();
-                        list.Add(ev);
-                    }
-                }
-                macroEvents = list;
+                macroEvents = LoadMacroEvents(name);
                 txtMacroName.Text = name;
                 Log("[加载] 已加载宏 " + name + "（" + macroEvents.Count + " 事件）");
                 UpdateMacroStatus();
@@ -1415,6 +2072,44 @@ namespace KeyMacro
             lock (sendLock) { SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT))); }
         }
 
+        void SendMouseClick(int btn)
+        {
+            // 对标鼠大侠：down/up 一次 SendInput 批量发出，系统微秒级连续处理，中间零 Sleep
+            // 消除 BelowNormal 线程下 Sleep 膨胀造成的"伪长按"→ 指针发钝卡顿
+            INPUT[] inputs = new INPUT[2];
+            for (int i = 0; i < 2; i++)
+            {
+                inputs[i].type = INPUT_MOUSE;
+                inputs[i].U.mi.dx = 0;
+                inputs[i].U.mi.dy = 0;
+                inputs[i].U.mi.mouseData = 0;
+                inputs[i].U.mi.time = 0;
+                inputs[i].U.mi.dwExtraInfo = IntPtr.Zero;
+            }
+            inputs[0].U.mi.dwFlags = MouseFlag(btn, false); // down
+            inputs[1].U.mi.dwFlags = MouseFlag(btn, true);  // up
+            lock (sendLock) { SendInput(2, inputs, Marshal.SizeOf(typeof(INPUT))); }
+        }
+
+        void SendMouseMoveAbs(int x, int y)
+        {
+            // 绝对坐标移动鼠标（x/y 为屏幕坐标，映射整个虚拟桌面，多屏修正）
+            Rectangle vs = SystemInformation.VirtualScreen;
+            INPUT input = new INPUT();
+            input.type = INPUT_MOUSE;
+            input.U.mi.dx = (int)Math.Round((x - vs.X) * 65536.0 / vs.Width);
+            input.U.mi.dy = (int)Math.Round((y - vs.Y) * 65536.0 / vs.Height);
+            if (input.U.mi.dx < 0) input.U.mi.dx = 0;
+            if (input.U.mi.dy < 0) input.U.mi.dy = 0;
+            if (input.U.mi.dx > 65535) input.U.mi.dx = 65535;
+            if (input.U.mi.dy > 65535) input.U.mi.dy = 65535;
+            input.U.mi.mouseData = 0;
+            input.U.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+            input.U.mi.time = 0;
+            input.U.mi.dwExtraInfo = IntPtr.Zero;
+            lock (sendLock) { SendInput(1, new INPUT[] { input }, Marshal.SizeOf(typeof(INPUT))); }
+        }
+
         uint MouseFlag(int btn, bool up)
         {
             switch (btn)
@@ -1423,6 +2118,30 @@ namespace KeyMacro
                 case 1: return up ? MOUSEEVENTF_RIGHTUP : MOUSEEVENTF_RIGHTDOWN;
                 default: return up ? MOUSEEVENTF_MIDDLEUP : MOUSEEVENTF_MIDDLEDOWN;
             }
+        }
+
+        // ================= DD 驱动硬件级输入 =================
+        int DDMouseDown(int btn) { return btn == 0 ? 1 : btn == 1 ? 4 : 16; }
+        int DDMouseUp(int btn) { return btn == 0 ? 2 : btn == 1 ? 8 : 32; }
+
+        void SendMouseClickDD(int btn)
+        {
+            // down/up 两个驱动调用直通内核，中间零 Sleep，速度对齐 SendInput 批量版
+            DD_btn(DDMouseDown(btn));
+            DD_btn(DDMouseUp(btn));
+        }
+
+        void DDMoveAbs(int x, int y)
+        {
+            // 屏幕坐标 → DD 绝对坐标（0~65535 归一化，映射整个虚拟桌面）
+            Rectangle vs = SystemInformation.VirtualScreen;
+            int dx = (int)Math.Round((x - vs.X) * 65536.0 / vs.Width);
+            int dy = (int)Math.Round((y - vs.Y) * 65536.0 / vs.Height);
+            if (dx < 0) dx = 0;
+            if (dy < 0) dy = 0;
+            if (dx > 65535) dx = 65535;
+            if (dy > 65535) dy = 65535;
+            DD_mov(dx, dy);
         }
 
         bool IsExtendedKey(Keys k)
@@ -1462,7 +2181,7 @@ namespace KeyMacro
                 List<string> lines = new List<string>();
                 foreach (Bind b in binds)
                 {
-                    lines.Add("key=" + b.type + "," + b.code + "," + b.freq + "," + b.trigger + "," + (b.hold ? "1" : "0"));
+                    lines.Add("key=" + b.type + "," + b.code + "," + b.freq + "," + b.trigger + "," + (b.hold ? "1" : "0") + "," + b.clickX + "," + b.clickY);
                 }
                 System.IO.File.WriteAllLines(ConfigPath(), lines.ToArray(), System.Text.Encoding.UTF8);
             }
@@ -1506,9 +2225,11 @@ namespace KeyMacro
                             {
                                 if (parts.Length >= 4) int.TryParse(parts[3], out trig);
                                 if (parts.Length >= 5) hold = (parts[4] == "1");
+                                int cx = -1, cy = -1;
+                                if (parts.Length >= 7) { int.TryParse(parts[5], out cx); int.TryParse(parts[6], out cy); }
                                 if (freq < 1) freq = 1;
                                 if (freq > 100) freq = 100;
-                                AddBind(type, code, freq, trig, hold);
+                                AddBind(type, code, freq, trig, hold, cx, cy);
                                 loaded = true;
                             }
                         }
